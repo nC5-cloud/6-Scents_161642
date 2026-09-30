@@ -1,81 +1,402 @@
 """
-Random Forest classifier for Phase 1 (ambient, no-heat) sessions.
-Same GroupKFold logic as before, updated feature set: rise-time,
-recovery-time, and VOC/NOx ratio replace the old temperature features.
+Training and evaluation pipeline for the e-nose classifier.
+
+Two models are produced:
+
+1. Random Forest:
+   - primary research/evaluation model
+   - group-aware cross-validation by session_id
+   - saved as model_random_forest.joblib
+
+2. Small Decision Tree:
+   - TinyML deployment candidate
+   - shallow tree intended for MCU inference
+   - exported as tinyml_model.h
+   - saved as model_tinyml.joblib
+
+No row-level random split is used. A complete session is always kept
+inside one validation group.
+
+Important:
+- threat_alert is never a feature.
+- compound/session_id/heater_profile are metadata.
+- Synthetic data is validation-only and must not be presented as real
+  narcotics/explosives measurements.
 """
+
+from pathlib import Path
+import json
 
 import numpy as np
 import pandas as pd
+from joblib import dump
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    confusion_matrix,
+    classification_report,
+)
 from sklearn.model_selection import GroupKFold
-from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.tree import DecisionTreeClassifier, _tree
+
 
 FEATURE_COLS = [
     "delta_bme688_res_ohms",
     "max_delta_bme688_res_ohms",
     "response_bme688_res_ohms_ms",
+    "recovery_bme688",
 
     "delta_sgp41_sraw_voc",
     "max_delta_sgp41_sraw_voc",
     "response_sgp41_sraw_voc_ms",
+    "recovery_sgp41_voc",
 
     "delta_sgp41_sraw_nox",
     "max_delta_sgp41_sraw_nox",
     "response_sgp41_sraw_nox_ms",
+    "recovery_sgp41_nox",
 
     "voc_nox_ratio",
+
+    "mean_ambient_temp",
+    "mean_ambient_hum",
+    "std_ambient_temp",
+    "std_ambient_hum",
+    "cycle_count",
 ]
 
+MODEL_DIR = Path("models")
+MODEL_DIR.mkdir(exist_ok=True)
 
-def train_and_evaluate(feature_df: pd.DataFrame, n_splits: int = 5):
-    X = feature_df[FEATURE_COLS]
-    y = feature_df["label"]
-    groups = feature_df["session_id"]
+FEATURE_MATRIX = Path("feature_matrix.csv")
+EVALUATION_FILE = MODEL_DIR / "evaluation_summary.json"
+FOLD_FILE = MODEL_DIR / "fold_results.csv"
+RF_MODEL_FILE = MODEL_DIR / "model_random_forest.joblib"
+TINY_MODEL_FILE = MODEL_DIR / "model_tinyml.joblib"
+TINY_HEADER_FILE = MODEL_DIR / "tinyml_model.h"
 
+
+def validate_dataset(df):
+    missing = [
+        c for c in FEATURE_COLS + ["label", "session_id"]
+        if c not in df.columns
+    ]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    if df["session_id"].nunique() < 2:
+        raise ValueError("Need at least two independent sessions.")
+
+    if df["label"].nunique() < 2:
+        raise ValueError("Need both label 0 and label 1.")
+
+    # Do not silently train on incomplete numeric data.
+    if df[FEATURE_COLS].isna().any().any():
+        bad = df[FEATURE_COLS].columns[
+            df[FEATURE_COLS].isna().any()
+        ].tolist()
+        raise ValueError(
+            f"NaN values found in feature columns: {bad}. "
+            "Regenerate the feature matrix or clean the raw sessions."
+        )
+
+
+def evaluate_model(model, X, y, groups, n_splits=5):
     n_splits = min(n_splits, groups.nunique())
+    if n_splits < 2:
+        raise ValueError("Need at least 2 unique sessions for GroupKFold.")
+
     gkf = GroupKFold(n_splits=n_splits)
+    fold_rows = []
 
-    fold_accuracies = []
-    importance_sum = np.zeros(len(FEATURE_COLS))
+    predictions = np.empty(len(y), dtype=int)
 
-    for fold, (train_idx, test_idx) in enumerate(gkf.split(X, y, groups), start=1):
-        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+    for fold, (train_idx, test_idx) in enumerate(
+        gkf.split(X, y, groups), start=1
+    ):
+        model.fit(X.iloc[train_idx], y.iloc[train_idx])
+        preds = model.predict(X.iloc[test_idx])
+        predictions[test_idx] = preds
 
-        clf = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
-        clf.fit(X_train, y_train)
-        preds = clf.predict(X_test)
+        acc = accuracy_score(y.iloc[test_idx], preds)
+        bal_acc = balanced_accuracy_score(y.iloc[test_idx], preds)
 
-        acc = accuracy_score(y_test, preds)
-        fold_accuracies.append(acc)
-        importance_sum += clf.feature_importances_
+        fold_rows.append({
+            "fold": fold,
+            "accuracy": acc,
+            "balanced_accuracy": bal_acc,
+            "train_sessions": groups.iloc[train_idx].nunique(),
+            "test_sessions": groups.iloc[test_idx].nunique(),
+            "held_out_sessions": ",".join(
+                sorted(groups.iloc[test_idx].astype(str).unique())
+            ),
+        })
 
-        held_out = sorted(groups.iloc[test_idx].unique())
-        print(f"Fold {fold}/{n_splits}  (held-out sessions: {held_out})")
-        print(f"  Accuracy: {acc:.3f}")
-        print(f"  Confusion matrix [[TN FP] [FN TP]]:\n{confusion_matrix(y_test, preds)}")
+        print(f"\nFold {fold}/{n_splits}")
+        print(
+            f"  Accuracy          : {acc:.3f}\n"
+            f"  Balanced accuracy : {bal_acc:.3f}"
+        )
+        print(
+            "  Confusion matrix [[TN FP] [FN TP]]:\n"
+            f"{confusion_matrix(y.iloc[test_idx], preds, labels=[0, 1])}"
+        )
 
-    print("\n=== Summary ===")
-    print(f"Mean accuracy across {n_splits} folds: "
-    f"{np.mean(fold_accuracies):.3f} (+/- {np.std(fold_accuracies):.3f})")
+    fold_df = pd.DataFrame(fold_rows)
+    return fold_df, predictions
 
+
+def export_tree_header(model, feature_names, output_file):
+    tree = model.tree_
+
+    feature_index = tree.feature.astype(int)
+    thresholds = tree.threshold.astype(float)
+    children_left = tree.children_left.astype(int)
+    children_right = tree.children_right.astype(int)
+
+    # A leaf stores the class with the greatest weighted count.
+    leaf_class = np.argmax(tree.value[:, 0, :], axis=1).astype(int)
+
+    def fmt_float(value):
+        if np.isfinite(value):
+            return f"{float(value):.9g}f"
+        return "0.0f"
+
+    feature_names_c = []
+    for name in feature_names:
+        safe = "".join(ch if ch.isalnum() else "_" for ch in name)
+        feature_names_c.append(safe)
+
+    lines = [
+        "/* Auto-generated by trainer_classifier.py. */",
+        "/* TinyML candidate: shallow DecisionTreeClassifier. */",
+        "/* Do not edit manually; regenerate after retraining. */",
+        "",
+        "#pragma once",
+        "#include <stddef.h>",
+        "#include <stdint.h>",
+        "",
+        f"#define TINYML_FEATURE_COUNT {len(feature_names)}",
+        f"#define TINYML_NODE_COUNT {tree.node_count}",
+        "",
+        "static const char* const tinyml_feature_names[TINYML_FEATURE_COUNT] = {",
+    ]
+
+    for name in feature_names_c:
+        lines.append(f'    "{name}",')
+    lines.append("};\n")
+
+    lines.append(
+        "static const int8_t tinyml_feature_index[TINYML_NODE_COUNT] = {"
+    )
+    for value in feature_index:
+        # sklearn uses TREE_UNDEFINED (-2) for leaves.
+        lines.append(f"    {value},")
+    lines.append("};\n")
+
+    lines.append(
+        "static const float tinyml_threshold[TINYML_NODE_COUNT] = {"
+    )
+    for value in thresholds:
+        lines.append(f"    {fmt_float(value)},")
+    lines.append("};\n")
+
+    lines.append(
+        "static const int16_t tinyml_left[TINYML_NODE_COUNT] = {"
+    )
+    for value in children_left:
+        lines.append(f"    {value},")
+    lines.append("};\n")
+
+    lines.append(
+        "static const int16_t tinyml_right[TINYML_NODE_COUNT] = {"
+    )
+    for value in children_right:
+        lines.append(f"    {value},")
+    lines.append("};\n")
+
+    lines.append(
+        "static const uint8_t tinyml_leaf_class[TINYML_NODE_COUNT] = {"
+    )
+    for value in leaf_class:
+        lines.append(f"    {value},")
+    lines.append("};\n")
+
+    lines.extend([
+        "static inline uint8_t tinyml_predict(const float* features) {",
+        "    int node = 0;",
+        "    while (tinyml_feature_index[node] >= 0) {",
+        "        const int feature = tinyml_feature_index[node];",
+        "        if (features[feature] <= tinyml_threshold[node]) {",
+        "            node = tinyml_left[node];",
+        "        } else {",
+        "            node = tinyml_right[node];",
+        "        }",
+        "    }",
+        "    return tinyml_leaf_class[node];",
+        "}",
+        "",
+    ])
+
+    output_file.write_text("\n".join(lines), encoding="utf-8")
+
+
+def train_and_evaluate(feature_df, n_splits=5):
+    validate_dataset(feature_df)
+
+    X = feature_df[FEATURE_COLS].copy()
+    y = feature_df["label"].astype(int)
+    groups = feature_df["session_id"].astype(str)
+
+    print("========================================")
+    print("        E-NOSE MODEL TRAINING")
+    print("========================================")
+    print(f"Sessions : {groups.nunique()}")
+    print(f"Samples  : {len(feature_df)}")
+    print(f"Features : {len(FEATURE_COLS)}")
+    print("\nClass distribution:")
+    print(y.value_counts().sort_index().to_string())
+
+    # ---------------------------------------------------------
+    # Research/evaluation model
+    # ---------------------------------------------------------
+    rf_template = RandomForestClassifier(
+        n_estimators=150,
+        max_depth=6,
+        min_samples_leaf=2,
+        random_state=42,
+        class_weight="balanced",
+        n_jobs=-1,
+    )
+
+    rf_folds, _ = evaluate_model(
+        rf_template, X, y, groups, n_splits=n_splits
+    )
+
+    rf_final = RandomForestClassifier(
+        n_estimators=150,
+        max_depth=6,
+        min_samples_leaf=2,
+        random_state=42,
+        class_weight="balanced",
+        n_jobs=-1,
+    )
+    rf_final.fit(X, y)
+    dump(
+        {
+            "model": rf_final,
+            "features": FEATURE_COLS,
+            "classes": [0, 1],
+        },
+        RF_MODEL_FILE,
+    )
+
+    # ---------------------------------------------------------
+    # TinyML model
+    # ---------------------------------------------------------
+    tiny_template = DecisionTreeClassifier(
+        max_depth=4,
+        min_samples_leaf=3,
+        class_weight="balanced",
+        random_state=42,
+    )
+
+    tiny_folds, _ = evaluate_model(
+        tiny_template, X, y, groups, n_splits=n_splits
+    )
+
+    tiny_final = DecisionTreeClassifier(
+        max_depth=4,
+        min_samples_leaf=3,
+        class_weight="balanced",
+        random_state=42,
+    )
+    tiny_final.fit(X, y)
+
+    dump(
+        {
+            "model": tiny_final,
+            "features": FEATURE_COLS,
+            "classes": [0, 1],
+        },
+        TINY_MODEL_FILE,
+    )
+
+    export_tree_header(
+        tiny_final,
+        FEATURE_COLS,
+        TINY_HEADER_FILE,
+    )
+
+    # ---------------------------------------------------------
+    # Feature importance from RF
+    # ---------------------------------------------------------
     importances = pd.Series(
-        importance_sum / n_splits, index=FEATURE_COLS
+        rf_final.feature_importances_,
+        index=FEATURE_COLS,
     ).sort_values(ascending=False)
-    print("\nAverage feature importances:")
-    print(importances.round(3).to_string())
 
-    # break down accuracy per compound too, not just per binary label,
-    # useful today since your "positive" class spans 3 unrelated chemicals
-    if "compound" in feature_df.columns:
-        print("\nPer-compound breakdown (label, count):")
-        print(feature_df.groupby(["compound", "label"]).size().to_string())
+    print("\nAverage RF feature importance:")
+    print(importances.round(4).to_string())
 
-    final_clf = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
-    final_clf.fit(X, y)
-    return final_clf, importances
+    # ---------------------------------------------------------
+    # Save evaluation artifacts
+    # ---------------------------------------------------------
+    fold_df = rf_folds.copy()
+    fold_df["model"] = "random_forest"
+    tiny_fold_df = tiny_folds.copy()
+    tiny_fold_df["model"] = "tiny_decision_tree"
+
+    all_folds = pd.concat(
+        [fold_df, tiny_fold_df],
+        ignore_index=True,
+    )
+    all_folds.to_csv(FOLD_FILE, index=False)
+
+    summary = {
+        "sessions": int(groups.nunique()),
+        "samples": int(len(feature_df)),
+        "features": FEATURE_COLS,
+        "random_forest": {
+            "mean_accuracy": float(rf_folds["accuracy"].mean()),
+            "std_accuracy": float(rf_folds["accuracy"].std(ddof=0)),
+            "mean_balanced_accuracy": float(
+                rf_folds["balanced_accuracy"].mean()
+            ),
+        },
+        "tiny_decision_tree": {
+            "mean_accuracy": float(tiny_folds["accuracy"].mean()),
+            "std_accuracy": float(tiny_folds["accuracy"].std(ddof=0)),
+            "mean_balanced_accuracy": float(
+                tiny_folds["balanced_accuracy"].mean()
+            ),
+            "max_depth": 4,
+        },
+    }
+
+    EVALUATION_FILE.write_text(
+        json.dumps(summary, indent=2),
+        encoding="utf-8",
+    )
+
+    print("\n========================================")
+    print("TRAINING COMPLETE")
+    print("========================================")
+    print(f"RF model       : {RF_MODEL_FILE}")
+    print(f"TinyML model   : {TINY_MODEL_FILE}")
+    print(f"TinyML C header: {TINY_HEADER_FILE}")
+    print(f"Fold results   : {FOLD_FILE}")
+    print(f"Summary        : {EVALUATION_FILE}")
+
+    return rf_final, tiny_final
 
 
 if __name__ == "__main__":
-    feature_df = pd.read_csv("feature_matrix.csv")
+    if not FEATURE_MATRIX.exists():
+        raise SystemExit(
+            "feature_matrix.csv not found. Run feature_extraction.py first."
+        )
+
+    feature_df = pd.read_csv(FEATURE_MATRIX)
     train_and_evaluate(feature_df)

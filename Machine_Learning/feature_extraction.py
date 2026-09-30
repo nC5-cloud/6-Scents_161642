@@ -1,253 +1,118 @@
 """
-Phase 1 feature extraction for ESP32 MQTT sessions.
+Feature extraction for ESP32 e-nose sessions.
 
-ESP32 protocol:
+Protocol:
+    PURGE -> SAMPLE -> PURGE -> SAMPLE ...
 
-    PURGE  ->  SAMPLE -> PURGE -> SAMPLE ...
+One CSV session is one ML sample. Each contiguous PURGE->SAMPLE
+block is treated as one response cycle and the cycle features are
+aggregated into one session-level feature vector.
 
-Each valid PURGE -> SAMPLE pair is treated as one response cycle.
+The script works with real MQTT logger CSVs and the synthetic
+telemetry produced by Synthetic.py.
 
-One CSV session = one ML sample.
-
-No heater is used in Phase 1.
+Important:
+- threat_alert is never used as an ML feature.
+- session_id is kept only for grouping/traceability.
+- compound is metadata, not an input feature.
 """
 
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
-
-
-# ============================================================
-# SETTINGS
-# ============================================================
 
 DATA_DIR = Path("data")
 OUTPUT_FILE = Path("feature_matrix.csv")
 
-
-# ============================================================
-# REQUIRED RAW DATA COLUMNS
-# ============================================================
-
 REQUIRED_COLUMNS = [
-    "timestamp_ms",
-    "state",
-    "ambient_temp",
-    "ambient_hum",
-    "voc_raw",
-    "nox_raw",
-    "gas_resistance",
-    "label",
-    "session_id",
-    "compound",
+    "timestamp_ms", "state", "ambient_temp", "ambient_hum",
+    "voc_raw", "nox_raw", "gas_resistance",
+    "label", "session_id", "compound",
 ]
 
 
-# ============================================================
-# HELPER
-# ============================================================
 
 def clean_numeric(series):
     return pd.to_numeric(series, errors="coerce")
 
 
-# ============================================================
-# EXTRACT ONE CYCLE
-# ============================================================
+def _normalized_delta(baseline, peak):
+    if not np.isfinite(baseline) or baseline == 0 or not np.isfinite(peak):
+        return 0.0
+    return float((baseline - peak) / abs(baseline))
+
+
+def _recovery_fraction(baseline, peak, end_value):
+    """
+    0 = no recovery from peak
+    1 = returned to baseline
+    Values are clipped for robustness.
+    """
+    denominator = baseline - peak
+    if not np.isfinite(denominator) or abs(denominator) < 1e-12:
+        return 0.0
+
+    recovery = (end_value - peak) / denominator
+    return float(np.clip(recovery, -1.0, 1.5))
+
+
+def _safe_time_to_peak(sample, column):
+    if sample.empty:
+        return 0.0
+    valid = sample[["timestamp_ms", column]].dropna()
+    if valid.empty:
+        return 0.0
+    idx = valid[column].idxmin()
+    return float(valid.loc[idx, "timestamp_ms"] - valid["timestamp_ms"].iloc[0])
+
 
 def calculate_cycle_features(purge, sample):
-    """
-    Calculate response features from one PURGE -> SAMPLE cycle.
-    """
-
-    if len(purge) == 0 or len(sample) == 0:
+    if purge.empty or sample.empty:
         return None
 
-    # --------------------------------------------------------
-    # Baseline = mean of PURGE
-    # --------------------------------------------------------
+    purge = purge.sort_values("timestamp_ms")
+    sample = sample.sort_values("timestamp_ms")
 
     bme_baseline = purge["gas_resistance"].mean()
     voc_baseline = purge["voc_raw"].mean()
     nox_baseline = purge["nox_raw"].mean()
 
-    # --------------------------------------------------------
-    # Strongest SAMPLE response
-    # --------------------------------------------------------
-
     bme_peak = sample["gas_resistance"].min()
     voc_peak = sample["voc_raw"].min()
     nox_peak = sample["nox_raw"].min()
 
-    # --------------------------------------------------------
-    # Normalized response
-    # --------------------------------------------------------
-
-    if bme_baseline != 0:
-        delta_bme = (
-            (bme_baseline - bme_peak)
-            / bme_baseline
-        )
-    else:
-        delta_bme = 0.0
-
-    if voc_baseline != 0:
-        delta_voc = (
-            (voc_baseline - voc_peak)
-            / voc_baseline
-        )
-    else:
-        delta_voc = 0.0
-
-    if nox_baseline != 0:
-        delta_nox = (
-            (nox_baseline - nox_peak)
-            / nox_baseline
-        )
-    else:
-        delta_nox = 0.0
-
-    # --------------------------------------------------------
-    # Response timing
-    # --------------------------------------------------------
-
-    sample = sample.sort_values("timestamp_ms")
-
-    bme_peak_idx = sample["gas_resistance"].idxmin()
-    voc_peak_idx = sample["voc_raw"].idxmin()
-    nox_peak_idx = sample["nox_raw"].idxmin()
-
-    first_sample_time = sample["timestamp_ms"].iloc[0]
-
-    bme_response_time = (
-        sample.loc[bme_peak_idx, "timestamp_ms"]
-        - first_sample_time
-    )
-
-    voc_response_time = (
-        sample.loc[voc_peak_idx, "timestamp_ms"]
-        - first_sample_time
-    )
-
-    nox_response_time = (
-        sample.loc[nox_peak_idx, "timestamp_ms"]
-        - first_sample_time
-    )
+    bme_end = sample["gas_resistance"].iloc[-1]
+    voc_end = sample["voc_raw"].iloc[-1]
+    nox_end = sample["nox_raw"].iloc[-1]
 
     return {
-        "delta_bme": delta_bme,
-        "bme_response_time": bme_response_time,
+        "delta_bme": _normalized_delta(bme_baseline, bme_peak),
+        "bme_response_time": _safe_time_to_peak(sample, "gas_resistance"),
+        "bme_recovery": _recovery_fraction(bme_baseline, bme_peak, bme_end),
 
-        "delta_voc": delta_voc,
-        "voc_response_time": voc_response_time,
+        "delta_voc": _normalized_delta(voc_baseline, voc_peak),
+        "voc_response_time": _safe_time_to_peak(sample, "voc_raw"),
+        "voc_recovery": _recovery_fraction(voc_baseline, voc_peak, voc_end),
 
-        "delta_nox": delta_nox,
-        "nox_response_time": nox_response_time,
+        "delta_nox": _normalized_delta(nox_baseline, nox_peak),
+        "nox_response_time": _safe_time_to_peak(sample, "nox_raw"),
+        "nox_recovery": _recovery_fraction(nox_baseline, nox_peak, nox_end),
     }
 
 
-# ============================================================
-# EXTRACT SESSION
-# ============================================================
-
-def extract_session_features(df):
-    """
-    Find valid PURGE -> SAMPLE cycles and aggregate them
-    into one feature vector for the session.
-    """
-
-    # --------------------------------------------------------
-    # Clean state
-    # --------------------------------------------------------
-
-    df = df.copy()
-
-    df["state"] = (
-        df["state"]
-        .astype(str)
-        .str.upper()
-        .str.strip()
-    )
-
-    # --------------------------------------------------------
-    # Convert numeric columns
-    # --------------------------------------------------------
-
-    sensor_columns = [
-        "gas_resistance",
-        "voc_raw",
-        "nox_raw",
-        "ambient_temp",
-        "ambient_hum",
-        "timestamp_ms",
-    ]
-
-    for column in sensor_columns:
-        df[column] = clean_numeric(df[column])
-
-    df = df.sort_values("timestamp_ms").reset_index(drop=True)
-
-    # --------------------------------------------------------
-    # Find PURGE -> SAMPLE cycles
-    # --------------------------------------------------------
-
+def _find_cycles(df):
     cycles = []
-
-    current_purge = []
-
-    for _, row in df.iterrows():
-
-        state = row["state"]
-
-        if state == "PURGE":
-
-            # Start/continue current purge period
-            current_purge.append(row)
-
-        elif state == "SAMPLE":
-
-            # A SAMPLE is valid only if we have a preceding PURGE
-            if current_purge:
-
-                purge_df = pd.DataFrame(current_purge)
-                sample_rows = [row]
-
-                # Continue collecting SAMPLE rows
-                # until the next PURGE.
-                cycles.append(
-                    (purge_df, sample_rows)
-                )
-
-                current_purge = []
-
-            else:
-                # Ignore SAMPLE data before first PURGE
-                continue
-
-    # --------------------------------------------------------
-    # The above detects cycle starts.
-    # Now rebuild proper contiguous PURGE -> SAMPLE blocks.
-    # --------------------------------------------------------
-
-    cycles = []
-
     purge_rows = []
     sample_rows = []
     in_sample = False
 
     for _, row in df.iterrows():
-
         state = row["state"]
 
         if state == "PURGE":
-
             if in_sample and purge_rows and sample_rows:
                 cycles.append(
-                    (
-                        pd.DataFrame(purge_rows),
-                        pd.DataFrame(sample_rows)
-                    )
+                    (pd.DataFrame(purge_rows), pd.DataFrame(sample_rows))
                 )
 
             purge_rows = [row]
@@ -255,45 +120,47 @@ def extract_session_features(df):
             in_sample = False
 
         elif state == "SAMPLE":
-
             if purge_rows:
                 sample_rows.append(row)
                 in_sample = True
 
-    # Add final cycle
     if purge_rows and sample_rows:
         cycles.append(
-            (
-                pd.DataFrame(purge_rows),
-                pd.DataFrame(sample_rows)
-            )
+            (pd.DataFrame(purge_rows), pd.DataFrame(sample_rows))
         )
 
-    # --------------------------------------------------------
-    # Check cycles
-    # --------------------------------------------------------
+    return cycles
+
+
+def extract_session_features(df):
+    df = df.copy()
+
+    df["state"] = (
+        df["state"].astype(str).str.upper().str.strip()
+    )
+
+    sensor_columns = [
+        "gas_resistance", "voc_raw", "nox_raw",
+        "ambient_temp", "ambient_hum", "timestamp_ms",
+    ]
+
+    for column in sensor_columns:
+        df[column] = clean_numeric(df[column])
+
+    df = df.dropna(
+        subset=["timestamp_ms", "gas_resistance", "voc_raw", "nox_raw"]
+    )
+    df = df.sort_values("timestamp_ms").reset_index(drop=True)
+
+    cycles = _find_cycles(df)
 
     if not cycles:
-        print(
-            "WARNING: No valid PURGE -> SAMPLE cycles found."
-        )
+        print("  WARNING: No valid PURGE -> SAMPLE cycles found.")
         return None
 
-    print(f"  Valid cycles : {len(cycles)}")
-
-    # --------------------------------------------------------
-    # Calculate features for every cycle
-    # --------------------------------------------------------
-
     cycle_features = []
-
     for purge, sample in cycles:
-
-        features = calculate_cycle_features(
-            purge,
-            sample
-        )
-
+        features = calculate_cycle_features(purge, sample)
         if features is not None:
             cycle_features.append(features)
 
@@ -302,177 +169,156 @@ def extract_session_features(df):
 
     cycle_df = pd.DataFrame(cycle_features)
 
-    # --------------------------------------------------------
-    # Aggregate cycles into ONE session
-    #
-    # Mean = typical response
-    # Max  = strongest response
-    # --------------------------------------------------------
-
     delta_bme = cycle_df["delta_bme"].mean()
-    delta_bme_max = cycle_df["delta_bme"].max()
-
     delta_voc = cycle_df["delta_voc"].mean()
-    delta_voc_max = cycle_df["delta_voc"].max()
-
     delta_nox = cycle_df["delta_nox"].mean()
-    delta_nox_max = cycle_df["delta_nox"].max()
-
-    bme_response_time = cycle_df["bme_response_time"].mean()
-    voc_response_time = cycle_df["voc_response_time"].mean()
-    nox_response_time = cycle_df["nox_response_time"].mean()
-
-    # --------------------------------------------------------
-    # VOC / NOx relationship
-    # --------------------------------------------------------
-
-    voc_nox_ratio = (
-        delta_voc
-        / (abs(delta_nox) + 1e-6)
-    )
-
-    # --------------------------------------------------------
-    # Environmental information
-    # --------------------------------------------------------
-
-    mean_temperature = df["ambient_temp"].mean()
-    mean_humidity = df["ambient_hum"].mean()
-
-    # --------------------------------------------------------
-    # Build ONE feature row
-    # --------------------------------------------------------
 
     features = {
-
         "delta_bme688_res_ohms": delta_bme,
-        "max_delta_bme688_res_ohms": delta_bme_max,
-        "response_bme688_res_ohms_ms": bme_response_time,
+        "max_delta_bme688_res_ohms": cycle_df["delta_bme"].max(),
+        "response_bme688_res_ohms_ms": cycle_df["bme_response_time"].mean(),
+        "recovery_bme688": cycle_df["bme_recovery"].mean(),
 
         "delta_sgp41_sraw_voc": delta_voc,
-        "max_delta_sgp41_sraw_voc": delta_voc_max,
-        "response_sgp41_sraw_voc_ms": voc_response_time,
+        "max_delta_sgp41_sraw_voc": cycle_df["delta_voc"].max(),
+        "response_sgp41_sraw_voc_ms": cycle_df["voc_response_time"].mean(),
+        "recovery_sgp41_voc": cycle_df["voc_recovery"].mean(),
 
         "delta_sgp41_sraw_nox": delta_nox,
-        "max_delta_sgp41_sraw_nox": delta_nox_max,
-        "response_sgp41_sraw_nox_ms": nox_response_time,
+        "max_delta_sgp41_sraw_nox": cycle_df["delta_nox"].max(),
+        "response_sgp41_sraw_nox_ms": cycle_df["nox_response_time"].mean(),
+        "recovery_sgp41_nox": cycle_df["nox_recovery"].mean(),
 
-        "voc_nox_ratio": voc_nox_ratio,
+        "voc_nox_ratio": delta_voc / (abs(delta_nox) + 1e-6),
 
-        "mean_ambient_temp": mean_temperature,
-        "mean_ambient_hum": mean_humidity,
+        "mean_ambient_temp": df["ambient_temp"].mean(),
+        "mean_ambient_hum": df["ambient_hum"].mean(),
+        "std_ambient_temp": df["ambient_temp"].std(ddof=0),
+        "std_ambient_hum": df["ambient_hum"].std(ddof=0),
+
+        "cycle_count": len(cycle_features),
 
         "label": int(df["label"].iloc[0]),
-        "session_id": df["session_id"].iloc[0],
-        "compound": df["compound"].iloc[0],
+        "session_id": str(df["session_id"].iloc[0]),
+        "compound": str(df["compound"].iloc[0]),
     }
+
+    # Heater metadata is traceability metadata, not an ML input here.
+    if "heater_profile" in df.columns:
+        values = df["heater_profile"].dropna().astype(str)
+        features["heater_profile"] = (
+            values.mode().iloc[0] if not values.empty else "ambient"
+        )
+    else:
+        features["heater_profile"] = "ambient"
+
+    for heater_col in ["heater_temp_c", "bme_heater_temp_c"]:
+        if heater_col in df.columns:
+            numeric = clean_numeric(df[heater_col]).dropna()
+            if not numeric.empty:
+                features["heater_temp_c"] = float(numeric.mean())
+                break
+    else:
+        features["heater_temp_c"] = np.nan
 
     return features
 
 
-# ============================================================
-# PROCESS ONE CSV
-# ============================================================
-
 def process_file(csv_file):
-
     print(f"\nProcessing: {csv_file.name}")
 
-    df = pd.read_csv(csv_file)
+    try:
+        df = pd.read_csv(csv_file)
+    except Exception as error:
+        print(f"  ERROR reading file: {error}")
+        return None
 
-    missing = [
-        column
-        for column in REQUIRED_COLUMNS
-        if column not in df.columns
-    ]
-
+    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
-        print("ERROR: Missing columns:")
-        print(missing)
+        print(f"  ERROR missing columns: {missing}")
         return None
 
     features = extract_session_features(df)
-
     if features is None:
         return None
 
-    print(f"  Compound : {features['compound']}")
-    print(f"  Label    : {features['label']}")
-
     print(
-        f"  BME ΔR   : "
-        f"{features['delta_bme688_res_ohms']:.4f}"
+        f"  Compound={features['compound']} | "
+        f"Label={features['label']} | "
+        f"Cycles={features['cycle_count']} | "
+        f"Heater={features['heater_profile']}"
     )
-
-    print(
-        f"  VOC Δ    : "
-        f"{features['delta_sgp41_sraw_voc']:.4f}"
-    )
-
-    print(
-        f"  NOx Δ    : "
-        f"{features['delta_sgp41_sraw_nox']:.4f}"
-    )
-
     return features
 
 
-# ============================================================
-# MAIN
-# ============================================================
-
 def main():
-
-    csv_files = sorted(DATA_DIR.glob("*.csv"))
+    csv_files = sorted(
+        p for p in DATA_DIR.glob("*.csv")
+        if p.name != OUTPUT_FILE.name
+    )
 
     if not csv_files:
-
-        print("No CSV files found in data/")
+        print("No raw session CSV files found in data/")
         return
 
     print("========================================")
-    print("   PHASE 1 FEATURE EXTRACTION")
+    print("   E-NOSE FEATURE EXTRACTION")
     print("========================================")
-
-    print(f"Found {len(csv_files)} CSV file(s).")
+    print(f"Found {len(csv_files)} raw session file(s).")
 
     all_features = []
 
     for csv_file in csv_files:
-
         features = process_file(csv_file)
-
         if features is not None:
             all_features.append(features)
 
     if not all_features:
-
         print("\nNo valid sessions were processed.")
         return
 
     feature_df = pd.DataFrame(all_features)
 
-    feature_df.to_csv(
-        OUTPUT_FILE,
-        index=False
-    )
+    # Stable, readable column order.
+    ordered = [
+        "delta_bme688_res_ohms",
+        "max_delta_bme688_res_ohms",
+        "response_bme688_res_ohms_ms",
+        "recovery_bme688",
+        "delta_sgp41_sraw_voc",
+        "max_delta_sgp41_sraw_voc",
+        "response_sgp41_sraw_voc_ms",
+        "recovery_sgp41_voc",
+        "delta_sgp41_sraw_nox",
+        "max_delta_sgp41_sraw_nox",
+        "response_sgp41_sraw_nox_ms",
+        "recovery_sgp41_nox",
+        "voc_nox_ratio",
+        "mean_ambient_temp",
+        "mean_ambient_hum",
+        "std_ambient_temp",
+        "std_ambient_hum",
+        "cycle_count",
+        "label",
+        "session_id",
+        "compound",
+        "heater_profile",
+        "heater_temp_c",
+    ]
+
+    feature_df = feature_df[
+        [c for c in ordered if c in feature_df.columns]
+    ]
+
+    feature_df.to_csv(OUTPUT_FILE, index=False)
 
     print("\n========================================")
     print("FEATURE EXTRACTION COMPLETE")
     print("========================================")
-
-    print(
-        f"Sessions processed: "
-        f"{len(feature_df)}"
-    )
-
-    print(
-        f"Output: {OUTPUT_FILE}"
-    )
-
-    print("\nFeature matrix:")
-    print(
-        feature_df.to_string(index=False)
-    )
+    print(f"Sessions processed: {len(feature_df)}")
+    print(f"Output: {OUTPUT_FILE}")
+    print("\nClass counts:")
+    print(feature_df["label"].value_counts().sort_index().to_string())
 
 
 if __name__ == "__main__":

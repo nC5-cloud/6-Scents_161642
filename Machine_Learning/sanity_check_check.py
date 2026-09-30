@@ -1,74 +1,133 @@
 """
-Sanity-check generator only, not for real training. Makes fake 60s/2Hz
-sessions matching the Phase 1 protocol (baseline/exposure/recovery) so you
-can confirm feature_extraction.py and train_classifier.py run cleanly
-before your first real CSVs come off the ESP32.
+Sanity-check data generator.
+
+This file creates fake RAW ESP32-style telemetry, not feature rows.
+It is intended only to validate the pipeline:
+
+    sanity_check_check.py
+        -> feature_extraction.py
+        -> trainer_classifier.py
+
+It must never be presented as real chemical measurements.
 """
 
+from pathlib import Path
 import numpy as np
 import pandas as pd
-from pathlib import Path
 
-RNG = np.random.default_rng(7)
-INTERVAL_MS = 500
-RUN_MS = 60_000
-N = RUN_MS // INTERVAL_MS + 1
-BASE_IDX = int(10_000 // INTERVAL_MS)
-
-BME_BASE, VOC_BASE, NOX_BASE = 100_000.0, 32_000.0, 32_000.0
+DATA_DIR = Path("data")
+RUN_SECONDS = 60
+SAMPLE_INTERVAL_SECONDS = 1
+PURGE_SECONDS = 4
+SAMPLE_SECONDS = 6
+CYCLE_SECONDS = PURGE_SECONDS + SAMPLE_SECONDS
+RANDOM_SEED = 7
 
 COMPOUNDS = {
-    "acetone": (1, 0.55, 900, 4000),
-    "h2o2": (1, 0.30, 2500, 9000),
-    "ipa": (1, 0.60, 700, 3500),
-    "perfume": (0, 0.35, 1500, 6000),
-    "coffee_grounds": (0, 0.20, 3000, 12000),
-    "hand_sanitizer": (0, 0.45, 800, 4000),
+    "acetone_proxy": (1, 0.32, 0.55, 0.20),
+    "h2o2_proxy": (1, 0.48, 0.25, 0.50),
+    "ipa_proxy": (1, 0.28, 0.62, 0.12),
+    "perfume": (0, 0.35, 0.48, 0.10),
+    "coffee": (0, 0.22, 0.30, 0.38),
+    "hand_sanitizer": (0, 0.42, 0.58, 0.16),
 }
 
 
-def make_session(session_id, compound):
-    label, depth, rise_ms, recover_ms = COMPOUNDS[compound]
-    t = np.arange(0, RUN_MS + 1, INTERVAL_MS)
+def generate_session(session_id, compound, rng):
+    label, bme_strength, voc_strength, nox_strength = COMPOUNDS[compound]
 
-    def channel(base, depth_scale):
-        sig = np.full(N, base) + RNG.normal(0, base * 0.008, N)
-        peak_idx = BASE_IDX + int(rise_ms / INTERVAL_MS)
-        recover_idx = peak_idx + int(recover_ms / INTERVAL_MS)
-        for i in range(BASE_IDX, min(peak_idx, N)):
-            frac = (i - BASE_IDX) / max(1, peak_idx - BASE_IDX)
-            sig[i] -= base * depth * depth_scale * frac
-        if peak_idx < N:
-            sig[peak_idx] -= base * depth * depth_scale
-        for i in range(peak_idx, min(recover_idx, N)):
-            frac = (i - peak_idx) / max(1, recover_idx - peak_idx)
-            sig[i] = sig[peak_idx] + (base - sig[peak_idx]) * frac
-        if recover_idx < N:
-            sig[recover_idx:] = base + RNG.normal(0, base * 0.008, N - recover_idx)
-        return sig
+    bme_base = rng.normal(100000, 9000)
+    voc_base = rng.normal(30000, 1500)
+    nox_base = rng.normal(10000, 700)
 
-    bme = channel(BME_BASE, 1.0)
-    voc = channel(VOC_BASE, 0.8 if label else 0.5)
-    nox = channel(NOX_BASE, 0.3 if label else 0.55)
+    temp_base = rng.uniform(24, 30)
+    hum_base = rng.uniform(40, 70)
 
-    return pd.DataFrame({
-        "timestamp_ms": t, "bme688_res_ohms": bme,
-        "sgp41_sraw_voc": voc, "sgp41_sraw_nox": nox,
-        "label": label, "session_id": session_id, "compound": compound,
-    })
+    rows = []
+
+    for second in range(RUN_SECONDS):
+        position = second % CYCLE_SECONDS
+
+        if position < PURGE_SECONDS:
+            state = "PURGE"
+            response = 0.0
+        else:
+            state = "SAMPLE"
+            sample_t = position - PURGE_SECONDS
+            progress = 1.0 - np.exp(-sample_t / 2.5)
+            recovery = max(0.0, (sample_t - 4.0) / 2.0)
+            response = progress * (1.0 - 0.35 * recovery)
+
+        env_temp = temp_base + rng.normal(0, 0.15)
+        env_hum = hum_base + rng.normal(0, 0.7)
+
+        env_factor = (
+            1.0
+            + 0.008 * (env_temp - 27.0)
+            - 0.0015 * (env_hum - 55.0)
+        )
+
+        # Synthetic only: signal direction is an artificial convention.
+        bme = bme_base * (
+            1.0 - bme_strength * response * env_factor
+        )
+        voc = voc_base * (
+            1.0 - voc_strength * response * env_factor
+        )
+        nox = nox_base * (
+            1.0 - nox_strength * response * env_factor
+        )
+
+        bme += rng.normal(0, bme_base * 0.006)
+        voc += rng.normal(0, voc_base * 0.012)
+        nox += rng.normal(0, nox_base * 0.012)
+
+        rows.append({
+            "timestamp_ms": second * 1000,
+            "uptime_ms": second * 1000,
+            "state": state,
+            "ambient_temp": round(env_temp, 3),
+            "ambient_hum": round(env_hum, 3),
+            "voc_raw": int(max(voc, 1000)),
+            "nox_raw": int(max(nox, 1000)),
+            "gas_resistance": round(max(bme, 1000), 2),
+            "threat_alert": 0,
+            "label": label,
+            "session_id": session_id,
+            "compound": compound,
+        })
+
+    return pd.DataFrame(rows)
 
 
-def generate_dataset(out_dir="data", reps=5):
-    out_path = Path(out_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
-    sid = 0
-    plan = list(COMPOUNDS.keys()) * reps
-    RNG.shuffle(plan)
-    for compound in plan:
-        make_session(sid, compound).to_csv(out_path / f"session_{sid:03d}.csv", index=False)
-        sid += 1
-    print(f"Generated {sid} sanity-check sessions in '{out_path}/'")
+def main():
+    DATA_DIR.mkdir(exist_ok=True)
+    rng = np.random.default_rng(RANDOM_SEED)
+
+    # Only create files with a dedicated prefix so existing real data
+    # is not overwritten.
+    for old in DATA_DIR.glob("sanity_*.csv"):
+        old.unlink()
+
+    session_number = 0
+
+    for compound in COMPOUNDS:
+        for _ in range(5):
+            session_number += 1
+            session_id = f"sanity_{compound}_{session_number:03d}"
+            df = generate_session(session_id, compound, rng)
+            path = DATA_DIR / f"{session_id}.csv"
+            df.to_csv(path, index=False)
+
+    print("========================================")
+    print(" SANITY RAW DATA GENERATION COMPLETE")
+    print("========================================")
+    print("Generated 30 synthetic raw sessions.")
+    print("These are NOT real narcotics/explosives measurements.")
+    print("\nNext:")
+    print("  python feature_extraction.py")
+    print("  python trainer_classifier.py")
 
 
 if __name__ == "__main__":
-    generate_dataset()
+    main()
