@@ -106,9 +106,9 @@ Reads `feature_matrix.csv` and prints cross-validation results.
 
 - [x] Sensor array and pump firmware, OLED, MQTT telemetry
 - [x] Data logger, feature extraction, training script
-- [ ] Real data collection across compounds
-- [ ] Classifier training and evaluation
-- [ ] On-device TinyML inference and threat alert
+- [x] Real data collection across compounds
+- [x] Classifier training and evaluation
+- [x] On-device TinyML inference and threat alert
 - [ ] Offline logging to flash, multi-level alarm
 - [ ] Heater-profile sweep on the BME688
 
