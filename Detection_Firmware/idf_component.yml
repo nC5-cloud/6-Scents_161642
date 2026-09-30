@@ -1,0 +1,5 @@
+dependencies:
+  k0i05/esp_sht4x: "^1.2.7"
+  k0i05/esp_bme680: "^1.2.7"
+  k0i05/esp_sgp4x: "^1.2.7"
+  k0i05/esp_ssd1306: "^1.2.7"
