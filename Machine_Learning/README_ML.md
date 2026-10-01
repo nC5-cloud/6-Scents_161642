@@ -1,4 +1,4 @@
-# 6-Scents ML Pipeline — No Heater Version
+# 6-Scents ML Pipeline
 
 This version intentionally contains **no heater-profile or heater-temperature handling** because heater control has not yet been added to the ESP32 firmware.
 
