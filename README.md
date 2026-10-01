@@ -142,7 +142,7 @@ Reads `feature_matrix.csv` and prints cross-validation results.
 * **Phase 2 Readiness:** Completed custom 2-layer KiCad PCB routing and 3D CAD models for the upgraded 6-MOX sensor array and thermal desorption cartridge, readying the project for final-round manufacturing.
 ## Cost
 
-Prototype is roughly Rs 4,000. Estimated production cost with extra sensors is around Rs 10,000, against Rs 8 to 10 lakh for a benchtop ion mobility spectrometer.
+Prototype is roughly Rs 6,000. Estimated production cost with extra sensors is around Rs 12,000, against Rs 8 to 10 lakh for a benchtop ion mobility spectrometer.
 
 ## Team
 
