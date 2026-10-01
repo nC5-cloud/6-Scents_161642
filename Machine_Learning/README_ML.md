@@ -78,7 +78,7 @@ The dataset contains six physically tested samples: three threat-analog and thre
 | 1 | Concentrated hydrogen peroxide | Threat-analog | 1 |
 | 2 | Concentrated acetone | Threat-analog | 1 |
 | 3 | Isopropyl alcohol | Threat-analog | 1 |
-| 4 | Coffee beans | Benign | 0 |
+| 4 | Coffee grounds | Benign | 0 |
 | 5 | Hand sanitizer | Benign | 0 |
 | 6 | Nail polish | Benign | 0 |
 
