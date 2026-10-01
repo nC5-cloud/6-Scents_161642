@@ -6,7 +6,7 @@ Built for Smart India Hackathon 2026.
 
 <!-- Add a photo of the pod and a short demo GIF here -->
 
-<img width="848" height="478" alt="Gif" src="https://github.com/user-attachments/assets/c50e0bee-e096-4727-8d11-f31787dd2631" />
+<img width="836" height="634" alt="image" src="https://github.com/user-attachments/assets/73970174-76f2-4042-b7d4-011b3aacd58b" />
 
 
 ## Why
