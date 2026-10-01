@@ -128,7 +128,13 @@ Reads `feature_matrix.csv` and prints cross-validation results.
 * **Classifier Performance:** Successfully trained and evaluated a Random Forest classifier (100 trees, max depth 5) using 5-fold GroupKFold cross-validation. The model evaluates 10 features extracted from the sensor telemetry, including normalized response depth, time-to-peak, and VOC/NOx ratios.
 
 
-* **Threat Discrimination:** The pipeline accurately distinguishes target threat analogs (Acetone, Hydrogen Peroxide, Isopropyl Alcohol) from benign environmental compounds (perfume, coffee grounds, hand sanitizer).
+* **Threat Discrimination:** The pipeline accurately distinguishes target threat analog (Acetone, Hydrogen Peroxide, Isopropyl Alcohol) from benign environmental compounds (perfume, coffee grounds, hand sanitizer). 
+
+* **Demonstration:**
+* Case 1 - (Perfume - No threat)
+<img width="1600" height="907" alt="image" src="https://github.com/user-attachments/assets/fa57a5ad-1bb2-4c34-960d-f0e1a3a46f68" />
+* Case 1 - (Isopropyl Alcohol - Threat)
+<img width="1600" height="913" alt="image" src="https://github.com/user-attachments/assets/df132cdd-9c9b-4c16-a27b-13db713ecdac" />
 
 
 * **Phase 2 Readiness:** Completed custom 2-layer KiCad PCB routing and 3D CAD models for the upgraded 6-MOX sensor array and thermal desorption cartridge, readying the project for final-round manufacturing.
