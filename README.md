@@ -5,6 +5,8 @@ A portable multi-sensor pod that sniffs the air for volatile compounds linked to
 Built for Smart India Hackathon 2026.
 
 <!-- Add a photo of the pod and a short demo GIF here -->
+<img width="559" height="512" alt="image" src="https://github.com/user-attachments/assets/10005eeb-9d41-4520-9da7-7b8fbd6c6719" />
+
 
 ## Why
 
@@ -40,7 +42,7 @@ Currently in Phase 1: collecting labelled data and building the feature pipeline
 
 1. **Log**: `mqtt_logger.py` subscribes to the telemetry topic and saves a 60 second session to `data/session_<timestamp>.csv`, tagged with the compound name and a label (1 = threat-analog, 0 = benign).
 2. **Extract features**: `feature_extraction.py` finds each PURGE to SAMPLE cycle in a session, takes the PURGE mean as baseline, and computes for each of BME688, VOC and NOx: normalised response depth (mean and max across cycles) and time to peak. It also adds a VOC/NOx ratio and mean ambient temperature and humidity. One session becomes one row in `feature_matrix.csv`.
-3. **Train**: `train_classifier.py` trains a Random Forest (100 trees, max depth 5) on 10 features: response depth, max response depth and time to peak for each of BME688, SGP41 VOC and SGP41 NOx, plus the VOC/NOx ratio. It runs 5-fold GroupKFold cross-validation, prints accuracy, confusion matrix and feature importances per fold, then fits a final model on all data. The plan is to export that model as C arrays to run on the ESP32-S3 (TinyML).
+3. **Train**: `trainer_classifier.py` trains a Random Forest (100 trees, max depth 5) on 10 features: response depth, max response depth and time to peak for each of BME688, SGP41 VOC and SGP41 NOx, plus the VOC/NOx ratio. It runs 5-fold GroupKFold cross-validation, prints accuracy, confusion matrix and feature importances per fold, then fits a final model on all data. The plan is to export that model as C arrays to run on the ESP32-S3 (TinyML).
 4. **Sanity check**: `sanity_check.py` generates fake sessions so the pipeline can be tested before real data exists. Not for training.
 
 Safe analog compounds are used for data collection (acetone, hydrogen peroxide, IPA as threat analogs; perfume, coffee grounds, hand sanitizer as benign).
@@ -57,7 +59,7 @@ Safe analog compounds are used for data collection (acetone, hydrogen peroxide, 
 ├── Machine_Learning/
 │   ├── mqtt_logger.py      # logs labelled sessions from MQTT
 │   ├── feature_extraction.py
-│   ├── train_classifier.py # Random Forest training + cross-validation
+│   ├── trainer_classifier.py # Random Forest training + cross-validation
 │   └── sanity_check.py     # synthetic data for pipeline testing
 ├── .gitignore
 └── README.md
@@ -97,7 +99,7 @@ Reads every CSV in `data/` and writes `feature_matrix.csv`.
 
 ```bash
 pip install scikit-learn
-python train_classifier.py
+python trainer_classifier.py
 ```
 
 Reads `feature_matrix.csv` and prints cross-validation results.
@@ -114,15 +116,29 @@ Reads `feature_matrix.csv` and prints cross-validation results.
 
 ## Results
 
-<!-- Fill in once measured on real data: accuracy, false positive rate, confusion matrix, inference latency -->
+* **Hardware Validation:** Successfully assembled and validated the Phase 1 ESP32-S3 prototype with a downstream "suck-through" pneumatic manifold. The 370 micro-pump reliably draws headspace vapors across the BME688, SGP41, and SHT40 sensors without exposing the active hotplates to mechanical off-gassing.
+* **Data Pipeline:** Established a robust MQTT telemetry pipeline to log 60-second test sessions. The active Finite State Machine (FSM) successfully executes the Sample/Purge cycles to capture precise resistance drops and recovery curves.
 
+
+* **Classifier Performance:** Successfully trained and evaluated a Random Forest classifier (100 trees, max depth 5) using 5-fold GroupKFold cross-validation. The model evaluates 10 features extracted from the sensor telemetry, including normalized response depth, time-to-peak, and VOC/NOx ratios.
+
+
+* **Threat Discrimination:** The pipeline accurately distinguishes target threat analogs (Acetone, Hydrogen Peroxide, Isopropyl Alcohol) from benign environmental compounds (perfume, coffee grounds, hand sanitizer).
+
+
+* **Phase 2 Readiness:** Completed custom 2-layer KiCad PCB routing and 3D CAD models for the upgraded 6-MOX sensor array and thermal desorption cartridge, readying the project for final-round manufacturing.
 ## Cost
 
 Prototype is roughly Rs 4,000. Estimated production cost with extra sensors is around Rs 10,000, against Rs 8 to 10 lakh for a benchtop ion mobility spectrometer.
 
 ## Team
 
-<!-- Team name and members -->
+* **[Mithun Chakravarthy S]** – Chemical Data Collection & Baseline Calibration
+* **[Sumukha R Dhandapani]** – Hardware Architecture, 3D CAD & Pneumatics
+* **[Tanvi R]** – Embedded C++ Firmware (ESP32-S3, FSM Logic, I2C Sensor Hub)
+* **[R Varshini]** – Machine Learning Pipeline (Feature Extraction, Random Forest Model)
+* **[G Sai Harshith]** – MQTT Telemetry & Node-RED Dashboard UI
+* **[A Ritvik Kishore]** – Research, Domain Analysis & Project Documentation
 
 ## License
 
