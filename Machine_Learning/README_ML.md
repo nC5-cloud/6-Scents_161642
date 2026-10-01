@@ -24,7 +24,7 @@ Six everyday samples, three per class. Safe analogs are used instead of real nar
 | 2 | Concentrated acetone | Threat-analog | 1 |
 | 3 | Isopropyl alcohol | Threat-analog | 1 |
 | 4 | Perfume | Benign | 0 |
-| 5 | Hand sanitizer | Benign | 0 |
+| 5 | Coffee Grounds | Benign | 0 |
 | 6 | Nail polish | Benign | 0 |
 
 The benign samples are strong, common smells found all over a railway station, so the model has to separate threat-like vapours from background interference rather than just react to "something strong".
