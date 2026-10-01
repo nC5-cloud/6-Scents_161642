@@ -10,7 +10,7 @@ Built for Smart India Hackathon 2026.
 
 
 
-<img width="700" height="512" alt="image" src="https://github.com/user-attachments/assets/15b35ad3-5442-4d2f-8b7b-684b34b2ece6" />
+<img width="519" height="512" alt="image" src="https://github.com/user-attachments/assets/15b35ad3-5442-4d2f-8b7b-684b34b2ece6" />
 
 
 ## Why
