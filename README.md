@@ -5,7 +5,8 @@ A portable multi-sensor pod that sniffs the air for volatile compounds linked to
 Built for Smart India Hackathon 2026.
 
 <!-- Add a photo of the pod and a short demo GIF here -->
-<img width="559" height="512" alt="image" src="https://github.com/user-attachments/assets/10005eeb-9d41-4520-9da7-7b8fbd6c6719" />
+
+<img width="848" height="478" alt="Gif" src="https://github.com/user-attachments/assets/c50e0bee-e096-4727-8d11-f31787dd2631" />
 
 
 ## Why
