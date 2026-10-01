@@ -6,8 +6,7 @@ Built for Smart India Hackathon 2026.
 
 <!-- Add a photo of the pod and a short demo GIF here -->
 
-<img width="719" height="558" alt="image" src="https://github.com/user-attachments/assets/133e53fc-6c42-46c9-8362-6f7667a95aca" />
-
+<img width="520" height="472" alt="image" src="https://github.com/user-attachments/assets/78a0c40d-4be5-4efc-9049-3fa17aee9b55" />
 
 
 <img width="519" height="512" alt="image" src="https://github.com/user-attachments/assets/15b35ad3-5442-4d2f-8b7b-684b34b2ece6" />
@@ -154,6 +153,4 @@ Prototype is roughly Rs 4,000. Estimated production cost with extra sensors is a
 * **[G Sai Harshith]** – MQTT Telemetry & Node-RED Dashboard UI
 * **[A Ritvik Kishore]** – Research, Domain Analysis & Project Documentation
 
-## License
 
-<!-- Add a LICENSE file and name it here -->
